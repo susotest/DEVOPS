@@ -1,0 +1,569 @@
+#FUNCTIONS
+function Usage {
+          echo " Usage : $PROGNAME [PRE] [POST] "
+          echo " PRE- Run it BEFORE the REBOOT  ( PRE ) "
+          echo " POST- RUN it AFTER the  REBOOT  (POST) "
+          echo " POST Option will also compare teh results"
+          echo " PRE option must be run PRIOR to POST option.."
+          echo " It is recommended to save a copy  of pre log ../mnt/$HST/snapshotpre.log"
+          exit
+}
+function CHK_MOUNT_ORDER {
+DRR=0
+for EFS  in `cat /etc/filesystems |grep -p jfs2 |grep :$ |grep -v "/mnt" | tr -d :`
+do
+MFS=`mount |grep -w jfs2 |awk '{print $2}' |grep -w ${EFS}$`
+if [[ "${MFS}" != "${EFS}" ]]
+then
+  echo " WARNING !!!!  $EFS IS NOT MOUNTED " |tee -a $LOG
+  DRR=1
+else
+   cd $EFS
+
+   DFS=`df -g . |tail -1 |awk '{print $7}'`
+   if [[ "$DFS" != "$EFS" ]]
+   then
+     echo " WARNING !! $EFS is not mounted CORRECTLY ( Check mount order )" |tee -a $LOG
+    DRR=1
+   fi
+fi
+done
+
+
+for EFS  in `cat /etc/filesystems |grep -p nfs |grep :$ |grep -v "/mnt:" | tr -d :`
+do
+MFS=`mount |grep  -w nfs3 |awk '{print $3}' |grep :$ | tr -d :`
+if [[ "${MFS}" != "${EFS}" ]]
+then
+  echo " WARNING !!!!  $EFS IS NOT MOUNTED " |tee -a $LOG
+  DRR=1
+else
+   cd $EFS
+   DFS=`df -g . |tail -1 |awk '{print $7}'`
+   if [[ "$DFS" != "$EFS" ]]
+   then
+     echo " WARNING !! $EFS is not mountedCORRECTLY ( Check mount order )" |tee -a $LOG
+    DRR=1
+   fi
+fi
+done
+
+
+if [[ $DRR -eq 0 ]]
+then
+  echo "Filesystems Mount order  , ALL FS mounted" |tee -a $LOG
+else
+  echo "ERROR Some filesystems are not mounted" |tee -a $LOG
+fi
+
+
+# Check teh FS that are mounted but not listed in /etc/filesystems
+
+for MNTFS in `mount |grep -w jfs2 |awk '{print $2}' |grep -v -w "/mnt"`
+do
+cat /etc/filesystems |grep -p jfs2 |grep  "${MNTFS}:" > /dev/null
+if  [[ $? -ne 0  ]]
+then
+   echo "WARNING !! $MNTFS is Mounted but not listed in /etc/filesystems" |tee -a $LOG
+fi
+done
+for MNTFS in `mount |grep -w nfs3 |awk '{print $3}' |grep -v -w "/mnt"`
+do
+cat /etc/filesystems |grep -p nfs |grep  "${MNTFS}:" > /dev/null
+if  [[ $? -ne 0  ]]
+then
+   echo " WARNING !!  $MNTFS is Mounted but not listed in /etc/filesystems" |tee -a $LOG
+fi
+done
+
+}
+#####################################################################
+function  Mount_points {
+echo "\n#JFS2_SECTION#" > $LOG
+mount |grep jfs2 |awk '{print ":"$2":"}' |sort >> $LOG
+echo "\n#NFS_SECTION#" >> $LOG
+mount |grep nfs3 |awk '{print $1":"$2"::"$3}' |sort >> $LOG
+#mount |grep nfs3 |awk '{print ":"$2":"}' |sort >> $LOG
+}
+
+# End of Mt Pt function
+#######################################################################
+function Network {
+echo "\n#ALIAS_SECTION#" >> $LOG
+IPCARDS=`ifconfig -l|sed 's/lo0//g'`
+  for interface  in `echo $IPCARDS `
+  do
+    ipaddr=`lsattr -El $interface -a netaddr|awk '{print $2}'`
+    NUM_ALIAS=`netstat -in |grep -w "$interface " |grep -v link | awk '{print $4}' |grep -c -v $ipaddr `
+    if [[ $NUM_ALIAS -ge 1  ]]
+    then
+       num_int=0
+        for ips  in `netstat -in |grep -w "$interface " |grep -v link| awk '{print $4}' |grep -v $ipaddr `
+        do
+           echo "${interface}_${num_int}:$ipaddr:$ips" >> $LOG
+           let num_int=${num_int}+1
+        done
+    else
+        ipalias=""
+        echo "$interface:$ipaddr:$ipalias" >> $LOG
+    fi
+  done
+echo "\n#ROUTE_SECTION#" >> $LOG
+netstat -rn|egrep -v "^Rout|Destination|^\:|^\$" | awk '$3 !~ /W/ {print $1":"$2":"$3":"$1}' |tr "/" "."  >> $LOG
+}
+#End of function Network
+#######################################################################
+function Resources {
+PROCS=`lsdev -Cc processor  |grep -c Available`
+EC=`lparstat -i |grep ^Entitled |grep -v Pool |awk -F: '{print $2}' |awk '{print $1}'`
+ONLINE_MEM=`lparstat -i |grep "Online Memory" |awk -F: '{print $2}' |awk '{print $1}'| tr -d "."  |tr -d " "`
+MAX_MEM=`lparstat -i |grep "Maximum Memory" |awk -F: '{print $2}' |awk '{print $1}'| tr -d "."  |tr -d " "`
+MIN_MEM=`lparstat -i |grep "Minimum Memory" |awk -F: '{print $2}' |awk '{print $1}'| tr -d "." |tr -d " " `
+INST_MEM=`lsattr -El mem0 |grep goodsize |awk '{print $2}' |tr -d " "`
+echo "\n#RESOURCES_SECTION#" >> $LOG
+echo "processors:$PROCS" >> $LOG
+echo "Entitlement:$EC" >> $LOG
+echo "Online_Memory:$ONLINE_MEM" >> $LOG
+echo "Maximum_Memory:$MAX_MEM" >> $LOG
+echo "Minimum_Memory:$MIN_MEM" >> $LOG
+echo "Installed_Memeory:$INST_MEM" >> $LOG
+}
+#End of resource Function
+#######################################################################
+####
+#AADAPTERS
+function Adapters {
+echo "\n#ADAPTER_SECTION#" >> $LOG
+lsdev -Cc adapter | grep  ^ent  | grep Available > /dev/null
+if [[ $? -eq 0 ]]
+then
+    NUM_ENT=`lsdev -Cc adapter | grep  ^ent  | grep -c Available `
+else
+    NUM_ENT=0
+fi
+lsdev -Cc adapter | grep  ^fcs  | grep Available > /dev/null
+if [[ $? -eq 0 ]]
+then
+    NUM_FCS=`lsdev -Cc adapter | grep  ^fcs  | grep -c Available `
+else
+    NUM_FCS=0
+fi
+echo "Ethernet_Adap:$NUM_ENT" >> $LOG
+echo "Fiber_Adap:$NUM_FCS" >> $LOG
+for FSCSI_NUM in `lsdev -Cc adapter | grep  ^fcs | awk '{print $1}'| cut -c 4`
+do
+echo "FSCSI$FSCSI_NUM":`lsattr -El fscsi$FSCSI_NUM | egrep "dyntrk" | awk '{print $1}'` >> $LOG
+done
+for FSCSI_NUM in `lsdev -Cc adapter | grep  ^fcs | awk '{print $1}'| cut -c 4`
+do
+echo "FSCS$FSCSI_NUM":`lsattr -El fscsi$FSCSI_NUM | grep fc_err_recov | awk '{print $1}'` >> $LOG
+done
+for FCS_NUM in `lsdev -Cc adapter | grep  ^fcs | awk '{print $1}'| cut -c 4`
+do
+echo "FCS$FCS_NUM":`lsattr -El fcs$FCS_NUM | grep num_cmd_elems | awk '{print $2}'` >> $LOG
+done
+}
+#End of  Adapters Function
+#######################################################################
+# Disks
+function Disks {
+#VG_INFO
+VGS_ONLINE=`lsvg -o |sort |tr "\n" ","`
+VGS_DEFINED=`lsvg  |sort |tr "\n" ","`
+NUM_PVS=`lspv | grep -c . `
+NUM_AVL_DISKS=`lsdev -Cc disk |grep -c Available`
+NUM_NA_DISKS=`lsdev -Cc disk |grep -c -v Available`
+NUM_TOT_DISKS=`lsdev -Cc disk |grep -c .`
+echo "\n#VG_SECTION#" >> $LOG
+echo "VGS_ONLINE:${VGS_ONLINE}" >> $LOG
+echo "VGS_DEFINED:$VGS_DEFINED" >>$LOG
+echo "\n#HDISK_SECTION#" >> $LOG
+echo "NUM_PVS:$NUM_PVS" >>$LOG
+echo "NUM_AVL_DISKS:$NUM_AVL_DISKS" >>$LOG
+echo "NUM_NA_DISKS:$NUM_NA_DISKS" >>$LOG
+echo "NUM_TOT_DISKS:$NUM_TOT_DISKS" >>$LOG
+lspv | while  read a b c d
+do
+    echo "$a:$b:$c:$d" >>$LOG
+done
+}
+#END Disk function
+#######################################################################
+#function PowerPath {
+#echo "\n#POWERPATH_SECTION#" >> $LOG
+#if  [[ -x /usr/sbin/powermt ]]
+#then
+#     echo  "PPATH:1" >> $LOG
+#     for i in `/usr/sbin/powermt display  |grep fscsi |awk '{print $2}'`
+#     do
+#        echo "${i}:`/usr/sbin/powermt display |grep -w $i |awk '{print $4$5}'`" >> $LOG
+#    done
+#else
+#   echo  "PPATH:0" >> $LOG
+
+#fi
+#}
+# End of Powerpath Section
+#######################################################################
+function System {
+echo "\n#SYSTEM_SECTION#" >> $LOG
+MAXUPROC=`lsattr -El sys0 -a maxuproc |awk '{print $2}'`
+BOOT_DEVICE=`bootinfo -b`
+echo "MAXUPROC:$MAXUPROC"  >> $LOG
+echo "BOOT_DEVICE:${BOOT_DEVICE}" >> $LOG
+echo "TIMEZONE:$TZ" >> $LOG
+}
+#END of SYSTEM function
+#######################################################################
+function VMO {
+echo "\n#VMO_SECTION#" >> $LOG
+vmo -a | egrep -v "n/a|%|pinnable_frames|maxpin"| awk '{print $1 ":" $3}' >> $LOG
+}
+#END of VMO function
+#######################################################################
+function Paging {
+echo "\n#PAGE_SECTION#" >> $LOG
+NUM_PAG_SPACE=`lsps -a |grep -cv "Used"`
+PS_SIZE=`lsps -s  | tail -1 |awk '{print $1}' |tr -d [A-Z]`
+echo "NUM_PAG_SPACE:${NUM_PAG_SPACE}" >> $LOG
+echo "PS_SIZE:$PS_SIZE" >>$LOG
+}
+#END Paging Function
+#######################################################################
+function VCS {
+lslpp -l |grep -i VRTSvcs > /dev/null
+if [[ $? -eq 0 ]]
+then
+   VCS_INSTALLED=Y
+   VCS_STATE=`/opt/VRTS/bin/haclus -display | grep "ClusState" |awk '{print $2}'`
+ echo "\n#VCS_SECTION#" >> $LOG
+ echo "VCS_INSTALLED:$VCS_INSTALLED" >> $LOG
+ echo "VCS_STATE:$VCS_STATE" >> $LOG
+else
+VCS_INSTALLED=N0
+echo "\n#VCS_SECTION#" >> $LOG
+echo "VCS_INSTALLED:$VCS_INSTALLED" >> $LOG
+fi
+}
+#End of VCS Function
+#######################################################################
+### COMAPRE FUNCTION ###############
+function compare  {
+for  SECT in   JFS2 NFS
+do
+  ERRLOG=/mnt/$HST/_${SECT}.LOG
+ > $ERRLOG
+  MATCH_ERR=0
+  MISS_ERR=0
+ echo " ============ CHECKING $SECT =================" |tee -a $COMPLOG
+ grep -p "#${SECT}_SECTION#" $PRELOG  > /dev/null
+ if [[ $? -eq 0 ]]
+ then
+ for PRE_LINE in `cat  $PRELOG  |grep -p "#${SECT}_SECTION#" |grep -v ^# `
+ do
+   PARM=`echo "${PRE_LINE}" |awk -F: '{print $2}'`
+   grep -w ${PARM} $POSTLOG > /dev/null
+   if [[ $? != 0 ]]
+   then
+        echo $RED
+     echo  "ERROR  $PARM ( $SECT )is missing AFTER REBOOT , was present BEFORE reboot"    |tee -a $COMPLOG
+        echo $DEF
+      MISS_ERR=1
+    fi
+ done
+  if [[ $MATCH_ERR -ne 0  || $MISS_ERR -ne 0 ]]
+  then
+      echo " RESULT $SECT ( PRE TO POST)  - FAILED " |tee -a $COMPLOG
+       #      echo $ERRLOG
+  else
+      echo " RESULT $SECT ( PRE TO POST)  - PASSED " |tee -a $COMPLOG
+  fi
+ else
+   echo FAILED : "$SECT - settings missing in pre log "
+ fi
+
+done
+#
+# COMPARE ROUTES
+#
+for  SECT in    ROUTE
+do
+  ERRLOG=/mnt/$HST/_${SECT}.LOG > $ERRLOG
+  MATCH_ERR=0
+  MISS_ERR=0
+ echo " ============ CHECKING $SECT =================" |tee -a $COMPLOG
+ grep -p "#${SECT}_SECTION#" $PRELOG  > /dev/null
+ if [[ $? -eq 0 ]]
+ then
+for PRE_LINE in `cat  $PRELOG  |grep -p "#${SECT}_SECTION#" |grep -v ^# `
+do
+  PARM=`echo "${PRE_LINE}" |awk -F: '{print $1}'`
+  PRE_VALUE=`echo "$PRE_LINE" |awk -F: '{print $2}'`
+  grep  ^${PARM}: $POSTLOG > /dev/null
+  if [[ $? != 0 ]]
+  then
+     echo " ERROR  $PARM ( $SECT )is missing AFTER REBOOT , was present BEFORE reboot" |tee -a $COMPLOG
+      MISS_ERR=1
+  else
+   POST_VALUE=`grep  ^${PARM}: $POSTLOG |awk -F: '{print $2}'`
+  grep -w ${PARM}$ $POSTLOG > /dev/null
+    if [[ "$POST_VALUE"  !=  "$PRE_VALUE" ]]
+    then
+  echo " ERROR - $SECT PARAMETER $PARM HAS Pre reboot value of $PRE_VALUE and Post Reboot Value of $POST_VALUE " |tee -a $COMPLOG
+       MATCH_ERR=1
+    fi
+  fi
+done
+  if [[ $MATCH_ERR -ne 0  || $MISS_ERR -ne 0 ]]
+  then
+      echo " RESULT $SECT ( PRE TO POST)  - FAILED " |tee -a $COMPLOG
+       #      echo $ERRLOG
+  else
+      echo " RESULT $SECT ( PRE TO POST)  - PASSED " |tee -a $COMPLOG
+  fi
+ else
+   echo FAILED : "$SECT - settings missing in pre log "
+ fi
+done
+# COMPARE RESOURCES ADAPTER  ROUTE ALIAS VG HDISK
+for  SECT in    RESOURCES ADAPTER  ALIAS VG HDISK PAGE VCS SYSTEM VMO
+do
+  ERRLOG=/mnt/$HST/_${SECT}.LOG
+ > $ERRLOG
+  MATCH_ERR=0
+  MISS_ERR=0
+ echo " ============ CHECKING $SECT =================" |tee -a $COMPLOG
+ grep -p "#${SECT}_SECTION#" $PRELOG  > /dev/null
+ if [[ $? -eq 0 ]]
+ then
+for PRE_LINE in `cat  $PRELOG  |grep -p "#${SECT}_SECTION#" |grep -v ^# `
+do
+  PARM=`echo "${PRE_LINE}" |awk -F: '{print $1}'`
+  PRE_VALUE=`echo "$PRE_LINE" |awk -F: '{print $2}'`
+  grep -w ^$PARM $POSTLOG > /dev/null
+  if [[ $? != 0 ]]
+  then
+        echo $RED
+     echo " ERROR  $PARM ( $SECT )is missing AFTER REBOOT , was present BEFORE reboot"    |tee -a $COMPLOG
+        echo $DEF
+      MISS_ERR=1
+  else
+    POST_VALUE=`grep -w ^$PARM $POSTLOG |awk -F: '{print $2}'`
+    if [[ "$POST_VALUE"  !=  "$PRE_VALUE" ]]
+    then
+echo $RED
+ echo " ERROR - $SECT PARAMETER $PARM HAS Pre reboot value of $PRE_VALUE and Post Reboot Value of $POST_VALUE "  |tee -a $COMPLOG
+echo $DEF
+       MATCH_ERR=1
+    fi
+  fi
+done
+  if [[ $MATCH_ERR -ne 0  || $MISS_ERR -ne 0 ]]
+  then
+      echo " RESULT $SECT ( PRE TO POST)  - FAILED " |tee -a $COMPLOG
+       #      echo $ERRLOG
+  else
+      echo " RESULT $SECT ( PRE TO POST)  - PASSED " |tee -a $COMPLOG
+  fi
+ else
+   echo FAILED : "$SECT - settings missing in pre log "
+ fi
+done
+}
+#END OF COMPARE FUNCTION
+########################################################################################
+function reverse_compare  {
+#ALIAS_SECTION#
+#ROUTE_SECTION#
+#RESOURCES_SECTION#
+#ADAPTER_SECTION#
+#VG_SECTION
+#HDISK_SECTION#
+#for  SECT in   ROUTE
+for  SECT in   JFS2 NFS
+do
+#  ERRLOG=/tmp/SYS_VERIFY/_${SECT}.LOG
+ERRLOG=/mnt/$HST/_${SECT}.LOG
+ > $ERRLOG
+  MATCH_ERR=0
+  MISS_ERR=0
+ echo " ============ CHECKING $SECT =================" |tee -a $COMPLOG
+ grep -p "#${SECT}_SECTION#" $POSTLOG  > /dev/null
+ if [[ $? -eq 0 ]]
+ then
+ for POST_LINE in `cat  $POSTLOG  |grep -p "#${SECT}_SECTION#" |grep -v ^# `
+ do
+   PARM=`echo "${POST_LINE}" |awk -F: '{print $2}'`
+   grep -w ${PARM}: $PRELOG > /dev/null
+   if [[ $? != 0 ]]
+   then
+     echo " ERROR  $PARM ( $SECT )is introduced after  AFTER REBOOT , WAS NOT there  BEFORE reboot"    |tee -a $COMPLOG
+      MISS_ERR=1
+    fi
+ done
+  if [[ $MATCH_ERR -ne 0  || $MISS_ERR -ne 0 ]]
+  then
+      echo " RESULT $SECT ( POST TO PRE)  - FAILED " |tee -a $COMPLOG
+       #      echo $ERRLOG
+  else
+      echo " RESULT $SECT ( POST TO PRE)  - PASSED " |tee -a $COMPLOG
+  fi
+ else
+   echo FAILED : "$SECT - settings missing in post log "
+ fi
+done
+#COMPARE ROUTE
+for  SECT in   ROUTE
+do
+  ERRLOG=/mnt/$HST/_${SECT}.LOG
+ > $ERRLOG
+  MATCH_ERR=0
+  MISS_ERR=0
+ echo " ============ CHECKING $SECT =================" |tee -a $COMPLOG
+ grep -p "#${SECT}_SECTION#" $POSTLOG  > /dev/null
+ if [[ $? -eq 0 ]]
+ then
+for POST_LINE in `cat  $POSTLOG  |grep -p "#${SECT}_SECTION#" |grep -v ^# `
+do
+  PARM=`echo "${POST_LINE}" |awk -F: '{print $1}'`
+  grep -w ^${PARM} $PRELOG > /dev/null
+  if [[ $? != 0 ]]
+  then
+     echo " ERROR  $PARM ( $SECT  )is INTRODUCED AFTER REBOOT , WAS NOT there BEFORE Reboot"    |tee -a $COMPLOG
+      MISS_ERR=1
+  fi
+done
+  if [[ $MATCH_ERR -ne 0  || $MISS_ERR -ne 0 ]]
+  then
+      echo " RESULT $SECT   ( POST TO PRE) - FAILED " |tee -a $COMPLOG
+  else
+      echo " RESULT $SECT   ( POST TO PRE) - PASSED " |tee -a $COMPLOG
+  fi
+ else
+   echo FAILED : "$SECT - settings missing in post log "
+ fi
+done
+for  SECT in   RESOURCES ADAPTER  ALIAS VG HDISK  PAGE VCS SYSTEM
+do
+  ERRLOG=/mnt/$HST/_${SECT}.LOG
+ > $ERRLOG
+  MATCH_ERR=0
+  MISS_ERR=0
+ echo " ============ CHECKING $SECT =================" |tee -a $COMPLOG
+ grep -p "#${SECT}_SECTION#" $POSTLOG  > /dev/null
+ if [[ $? -eq 0 ]]
+ then
+for POST_LINE in `cat  $POSTLOG  |grep -p "#${SECT}_SECTION#" |grep -v ^# `
+do
+  PARM=`echo "${POST_LINE}" |awk -F: '{print $1}'`
+  grep -w ^$PARM $PRELOG > /dev/null
+  if [[ $? != 0 ]]
+  then
+     echo " ERROR  $PARM ( $SECT  )is INTRODUCED AFTER REBOOT , WAS NOT there BEFORE Reboot"    |tee -a $COMPLOG
+      MISS_ERR=1
+  fi
+done
+  if [[ $MATCH_ERR -ne 0  || $MISS_ERR -ne 0 ]]
+  then
+      echo " RESULT $SECT   ( POST TO PRE) - FAILED " |tee -a $COMPLOG
+  else
+      echo " RESULT $SECT   ( POST TO PRE) - PASSED " |tee -a $COMPLOG
+  fi
+ else
+   echo FAILED : "$SECT - settings missing in post log "
+ fi
+done
+echo "Saved information in $COMPLOG "
+}
+#End of reverse compare function
+########################################################################################
+#END ALL FUNCTIONS
+########################################################################################
+#MAIN
+#SET PARAMETRS
+HST=`hostname`
+PRELOG=/mnt/$HST/snapshotpre.log
+POSTLOG=/mnt/$HST/snapshotpost.log
+PROGNAME=$0
+FLAG=$1
+DAT=`date +%m%d`
+DC=`echo $HST | awk '{$1 = substr($1,1,2)}1'`
+RED='\033[0;31m'
+DEF='\033[0m'
+
+#PREQUISTE
+case $FLAG in
+PRE)
+
+if [ $DC == ok ]
+then
+mount -o soft 10.132.36.249:/export/CONFIG /mnt
+else
+mount -o soft 10.148.123.25:/export/reports /mnt
+fi
+[[ ! -d /mnt/$HST ]] && mkdir -p /mnt/$HST
+   LOG=$PRELOG
+   if [[ -r  ${PRELOG}  ]]
+   then
+         echo " WARNING  !!! DIRECTORY /mnt/$HST exists "
+         echo "  Moving ${PRELOG} to ${PRELOG}.old .."
+         mv ${PRELOG} ${PRELOG}.old
+   fi
+     ;;
+POST)
+if [ $DC == ok ]
+then
+mount -o soft 10.132.36.249:/export/CONFIG /mnt
+else
+mount -o soft 10.148.123.25:/export/reports /mnt
+fi
+
+   LOG=$POSTLOG
+if [[ !  -d  /mnt/$HST ]]
+   then
+         echo " ERROR  !!! DIRECTORY /mnt/$HST DOES NOT EXIST "
+         echo " Exiting ..."
+         exit
+   fi
+if [[ ! -r /mnt/$HST/snapshotpre.log ]]
+   then
+        echo " ERROR !!! FILE /mnt/$HST/snapshotpre.log DOES NOT EXIST "
+        echo " EXITING ..."
+        exit
+   fi
+   ;;
+*)
+  Usage
+  ;;
+esac
+#COMPLOG=/tmp/SYS_VERIFY/snapcompare.out
+COMPLOG=/mnt/$HST/snapcompare.out
+> $COMPLOG
+
+#FUNCTION CALLS
+echo " Collecting Info in $LOG .."
+#CHK_MOUNT_ORDER
+Mount_points
+Network
+Resources
+Adapters
+Disks
+#PowerPath
+Paging
+VCS
+System
+VMO
+if [[ $FLAG == "POST" ]]
+then
+ #  echo " \n\n\n Comparing Info  from PRE reboot to POST Reboot .." |tee -a $COMPLOG
+   compare
+ #  echo " \n\n\n\n  Checking any New Paramters in POST Reboot log .." |tee -a $COMPLOG
+   reverse_compare
+fi
+[[ -f $COMLOG ]] && chmod 755 $COMPLOG
+[[ -f $LOG ]] && chmod 755 $LOG 2>/dev/null
+[[ -f $PRELOG ]] && chmod 755 $PRELOG 2>/dev/null
+[[ -f $POSTLOG ]] && chmod 755 $POSTLOG 2>/dev/null
+echo "Saved information in $LOG "
+echo "Done ."
+umount /mnt
